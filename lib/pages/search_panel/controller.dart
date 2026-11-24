@@ -1,0 +1,391 @@
+import 'dart:async' show StreamSubscription, Timer;
+
+import 'package:PiliPlus/http/loading_state.dart';
+import 'package:PiliPlus/http/search.dart';
+import 'package:PiliPlus/models/common/search/article_search_type.dart';
+import 'package:PiliPlus/models/common/search/search_type.dart';
+import 'package:PiliPlus/models/common/search/user_search_type.dart';
+import 'package:PiliPlus/models/common/search/video_search_type.dart';
+import 'package:PiliPlus/models/search/result.dart';
+import 'package:PiliPlus/pages/common/common_list_controller.dart';
+import 'package:PiliPlus/pages/search_result/controller.dart';
+import 'package:PiliPlus/pages/setting/widgets/list_editor_dialog.dart';
+import 'package:PiliPlus/utils/extension/scroll_controller_ext.dart';
+import 'package:material_ui/material_ui.dart';
+import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
+import 'package:get/get.dart';
+
+class SearchPanelController<R extends SearchNumData<T>, T>
+    extends CommonListController<R, T> {
+  SearchPanelController({
+    required this.keyword,
+    required this.searchType,
+    required this.tag,
+  });
+  final String tag;
+  final String keyword;
+  final SearchType searchType;
+  SearchType get searchType_ => searchType;
+
+  @override
+  bool get hasFooter => true;
+
+  // sort
+  // common
+  String order = '';
+
+  // video
+  VideoDurationType? videoDurationType; // int duration
+  VideoZoneType? videoZoneType; // int? tids;
+  int? pubBegin;
+  int? pubEnd;
+
+  // user
+  Rx<UserOrderType>? userOrderType;
+  Rx<UserType>? userType;
+
+  // article
+  Rx<ArticleZoneType>? articleZoneType; // int? categoryId;
+
+  SearchResultController? searchResultController;
+
+  // client-side keyword filter
+  final RxList<String> includeKeywords = <String>[].obs;
+  final RxList<String> excludeKeywords = <String>[].obs;
+
+  bool get supportsVideoTagFilter =>
+      searchType == SearchType.all || searchType == SearchType.video;
+
+  RegExp? _buildRegex(Iterable<String> keywords) {
+    if (keywords.isEmpty) return null;
+    try {
+      final pattern = keywords
+          .map((k) => k.contains('|') && !k.startsWith('(') ? '($k)' : k)
+          .join('|');
+      return RegExp(pattern, caseSensitive: false);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  List<String> _tagKeywords(List<String> keywords) => keywords
+      .where((keyword) => keyword.startsWith('#'))
+      .map((keyword) => keyword.substring(1).trim().toLowerCase())
+      .where((keyword) => keyword.isNotEmpty)
+      .toList();
+
+  List<E> filterKeywords<E>(
+    List<E> list,
+    String? Function(E) getTitle, {
+    Iterable<String>? Function(E)? getTags,
+  }) {
+    final hasInc = includeKeywords.isNotEmpty;
+    final hasExc = excludeKeywords.isNotEmpty;
+    if (!hasInc && !hasExc) return list;
+    final inc = _buildRegex(
+      includeKeywords.where((keyword) => !keyword.startsWith('#')),
+    );
+    final exc = _buildRegex(
+      excludeKeywords.where((keyword) => !keyword.startsWith('#')),
+    );
+    final incTags = _tagKeywords(includeKeywords);
+    final excTags = _tagKeywords(excludeKeywords);
+    final hasTagFilter = incTags.isNotEmpty || excTags.isNotEmpty;
+    return list.where((item) {
+      final title = getTitle(item);
+      // null 表示不支持标签，空集合表示视频未返回标签。
+      final tags = hasTagFilter
+          ? getTags?.call(item)?.map((tag) => tag.toLowerCase()).toList()
+          : null;
+      final needsInclude = (title != null && inc != null) ||
+          (tags != null && incTags.isNotEmpty);
+      if (needsInclude &&
+          !(title != null && (inc?.hasMatch(title) ?? false)) &&
+          !(tags?.any((tag) => incTags.any(tag.contains)) ?? false)) {
+        return false;
+      }
+      if (title != null && (exc?.hasMatch(title) ?? false)) return false;
+      if (tags?.any((tag) => excTags.any(tag.contains)) ?? false) return false;
+      return true;
+    }).toList();
+  }
+
+  Widget buildKeywordFilterSection(
+    BuildContext context,
+    ThemeData theme,
+    void Function(VoidCallback fn) setState,
+  ) {
+    final hasInc = includeKeywords.isNotEmpty;
+    final hasExc = excludeKeywords.isNotEmpty;
+    final hasAny = hasInc || hasExc;
+    final primary = theme.colorScheme.primary;
+    final error = theme.colorScheme.error;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 20),
+        const Text('关键词过滤', style: TextStyle(fontSize: 16)),
+        const SizedBox(height: 6),
+        Text(
+          '${supportsVideoTagFilter ? '普通内容匹配标题，支持正则；以 # 开头匹配视频标签中的文字，如 #历史。\n' : ''}'
+          '包含项任一匹配即可，排除项任一匹配即隐藏。',
+          style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
+        ),
+        const SizedBox(height: 10),
+        if (hasAny) ...[
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              if (hasInc)
+                ...includeKeywords.asMap().entries.map(
+                  (e) => InputChip(
+                    avatar: Text('+',
+                        style: TextStyle(
+                          color: primary,
+                          fontWeight: FontWeight.bold,
+                        )),
+                    label: Text(e.value),
+                    labelStyle: TextStyle(
+                      fontSize: 13,
+                      color: theme.colorScheme.onSecondaryContainer,
+                    ),
+                    backgroundColor: theme.colorScheme.secondaryContainer,
+                    deleteIconColor: theme.colorScheme.onSecondaryContainer,
+                    onDeleted: () {
+                      includeKeywords.removeAt(e.key);
+                      setState(() {});
+                    },
+                  ),
+                ),
+              if (hasExc)
+                ...excludeKeywords.asMap().entries.map(
+                  (e) => InputChip(
+                    avatar: Text('-',
+                        style: TextStyle(
+                          color: error,
+                          fontWeight: FontWeight.bold,
+                        )),
+                    label: Text(e.value),
+                    labelStyle: TextStyle(
+                      fontSize: 13,
+                      color: theme.colorScheme.onErrorContainer,
+                    ),
+                    backgroundColor: theme.colorScheme.errorContainer,
+                    deleteIconColor: theme.colorScheme.onErrorContainer,
+                    onDeleted: () {
+                      excludeKeywords.removeAt(e.key);
+                      setState(() {});
+                    },
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+        ],
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => _editKeywords(
+                  context,
+                  setState,
+                  title: '包含关键词',
+                  keywords: includeKeywords,
+                  theme: theme,
+                  isInclude: true,
+                ),
+                icon: Icon(
+                  hasInc ? Icons.edit : Icons.add,
+                  size: 16,
+                ),
+                label: Text(hasInc ? '编辑包含词' : '添加包含词'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => _editKeywords(
+                  context,
+                  setState,
+                  title: '排除关键词',
+                  keywords: excludeKeywords,
+                  theme: theme,
+                  isInclude: false,
+                ),
+                icon: Icon(
+                  hasExc ? Icons.edit : Icons.remove,
+                  size: 16,
+                ),
+                label: Text(hasExc ? '编辑排除词' : '添加排除词'),
+              ),
+            ),
+          ],
+        ),
+        if (hasAny)
+          TextButton(
+            onPressed: () {
+              includeKeywords.clear();
+              excludeKeywords.clear();
+              setState(() {});
+            },
+            child: const Text('清除所有关键词'),
+          ),
+      ],
+    );
+  }
+
+  Future<void> _editKeywords(
+    BuildContext context,
+    void Function(VoidCallback fn) setState, {
+    required String title,
+    required RxList<String> keywords,
+    required ThemeData theme,
+    required bool isInclude,
+  }) async {
+    final result = await showDialog<List<String>>(
+      context: context,
+      builder: (context) => ListEditorDialog(
+        title: title,
+        initialItems: List.from(keywords),
+        hintText: supportsVideoTagFilter
+            ? '输入关键词、正则或 #标签文字'
+            : '输入关键词或正则表达式',
+        itemLabel: isInclude ? '包含词' : '排除词',
+        validator: (value) {
+          if (value.isEmpty) return '请输入关键词';
+          if (value.startsWith('#')) {
+            if (!supportsVideoTagFilter) return '标签筛选仅适用于综合和视频搜索';
+            return value.substring(1).trim().isEmpty ? '请输入 # 后的标签文字' : null;
+          }
+          try {
+            RegExp(value);
+            return null;
+          } catch (_) {
+            return '无效的正则表达式';
+          }
+        },
+      ),
+    );
+    if (result != null) {
+      keywords.value = result;
+      setState(() {});
+      SmartDialog.showToast('已更新$title');
+    }
+  }
+
+  void onSortSearch({
+    bool getBack = true,
+    String? label,
+  }) {
+    if (getBack) Get.back();
+    SmartDialog.dismiss();
+    if (label != null) {
+      SmartDialog.showToast("「$label」的筛选结果");
+    }
+    SmartDialog.showLoading(msg: 'loading');
+    onReload().whenComplete(SmartDialog.dismiss);
+  }
+
+  StreamSubscription? _listener;
+
+  void cancelListener() {
+    _listener?.cancel();
+  }
+
+  @override
+  void onInit() {
+    super.onInit();
+    try {
+      searchResultController = Get.find<SearchResultController>(tag: tag);
+      _listener = searchResultController!.toTopIndex.listen((index) {
+        if (index == searchType.index) {
+          scrollController.animToTop();
+        }
+      });
+    } catch (_) {}
+    queryData();
+  }
+
+  @override
+  List<T>? getDataList(R response) {
+    return response.list;
+  }
+
+  @override
+  bool customHandleResponse(bool isRefresh, Success<R> response) {
+    if (isRefresh) {
+      searchResultController?.count[searchType.index] =
+          response.response.numResults ?? 0;
+    }
+    return false;
+  }
+
+  String? gaiaVtoken;
+
+  Timer? _timer;
+  void _stopTimer() {
+    if (_timer != null) {
+      _timer!.cancel();
+      _timer = null;
+    }
+  }
+
+  @override
+  Future<LoadingState<R>> customGetData() => SearchHttp.searchByType<R>(
+    searchType: searchType_,
+    keyword: keyword,
+    page: page,
+    order: order,
+    duration: videoDurationType?.index,
+    tids: videoZoneType?.tids,
+    orderSort: userOrderType?.value.orderSort,
+    userType: userType?.value.index,
+    categoryId: articleZoneType?.value.categoryId,
+    pubBegin: pubBegin,
+    pubEnd: pubEnd,
+    gaiaVtoken: gaiaVtoken,
+    onSuccess: _onSuccess,
+  );
+
+  void _onSuccess(String gaiaVtoken) {
+    this.gaiaVtoken = gaiaVtoken;
+    SmartDialog.showLoading(onDismiss: _stopTimer);
+    _timer = Timer(const Duration(milliseconds: 500), _onRequery);
+  }
+
+  void _onRequery() {
+    _stopTimer();
+    SmartDialog.dismiss(status: .loading);
+    if (!isClosed) queryData(page == 1);
+  }
+
+  @override
+  Future<void> onReload() {
+    scrollController.jumpToTop();
+    return super.onReload();
+  }
+
+  int _lastLoadMoreTime = 0;
+
+  bool get hasKeywordFilter =>
+      includeKeywords.isNotEmpty || excludeKeywords.isNotEmpty;
+
+  @override
+  Future<void> onLoadMore() async {
+    if (hasKeywordFilter) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (now - _lastLoadMoreTime < 1200) return;
+      await super.onLoadMore();
+      _lastLoadMoreTime = DateTime.now().millisecondsSinceEpoch;
+    } else {
+      return super.onLoadMore();
+    }
+  }
+
+  @override
+  void onClose() {
+    _stopTimer();
+    super.onClose();
+  }
+}

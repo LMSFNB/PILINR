@@ -1,0 +1,106 @@
+import 'package:PiliPlus/pages/setting/widgets/checkbox_num_list_tile.dart';
+import 'package:collection/collection.dart';
+import 'package:get/get.dart';
+import 'package:material_ui/material_ui.dart';
+
+class OrderedMultiSelectDialog<T> extends StatefulWidget {
+  final Iterable<T> initValues;
+  final Widget title;
+  final Map<T, String> values;
+  final Widget? Function(BuildContext context, T value)? subtitleBuilder;
+  final int minSelections;
+
+  const OrderedMultiSelectDialog({
+    super.key,
+    required this.initValues,
+    required this.values,
+    required this.title,
+    this.subtitleBuilder,
+    this.minSelections = 0,
+  });
+
+  @override
+  State<OrderedMultiSelectDialog<T>> createState() =>
+      _OrderedMultiSelectDialogState<T>();
+}
+
+class _OrderedMultiSelectDialogState<T>
+    extends State<OrderedMultiSelectDialog<T>> {
+  late Map<T, int> _tempValues;
+
+  @override
+  void initState() {
+    super.initState();
+    _tempValues = {for (final (i, j) in widget.initValues.indexed) j: i + 1};
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return AlertDialog(
+      clipBehavior: Clip.hardEdge,
+      title: widget.title,
+      contentPadding: const EdgeInsets.only(top: 12),
+      content: Material(
+        type: .transparency,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: widget.values.entries.map((i) {
+              return Builder(
+                builder: (context) {
+                  return OrderedCheckboxListTile(
+                    dense: true,
+                    value: _tempValues[i.key],
+                    title: Text(
+                      i.value,
+                      style: theme.textTheme.titleMedium!,
+                    ),
+                    subtitle: widget.subtitleBuilder?.call(context, i.key),
+                    onChanged: (value) {
+                      if (value == null) {
+                        _tempValues[i.key] = _tempValues.length + 1;
+                        setState(() {});
+                      } else {
+                        final pos = _tempValues.remove(i.key)!;
+                        if (pos == _tempValues.length + 1) {
+                          setState(() {});
+                        } else {
+                          _tempValues.updateAll(
+                            (key, value) => value > pos ? value - 1 : value,
+                          );
+                          setState(() {});
+                        }
+                      }
+                    },
+                  );
+                },
+              );
+            }).toList(),
+          ),
+        ),
+      ),
+      actionsPadding: const EdgeInsets.only(left: 16, right: 16, bottom: 12),
+      actions: [
+        TextButton(
+          onPressed: Get.back,
+          child: Text(
+            '取消',
+            style: TextStyle(
+              color: theme.colorScheme.outline,
+            ),
+          ),
+        ),
+        TextButton(
+          onPressed: _tempValues.length < widget.minSelections ? null : () {
+            assert(_tempValues.values.isSorted(Comparable.compare));
+            Get.back(result: _tempValues.keys.toList());
+          },
+          child: Text(_tempValues.length < widget.minSelections
+              ? '至少选择${widget.minSelections}项'
+              : '确定'),
+        ),
+      ],
+    );
+  }
+}
